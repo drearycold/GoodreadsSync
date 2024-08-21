@@ -1,57 +1,58 @@
-#!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
-from __future__ import (unicode_literals, division, absolute_import,
-                        print_function)
+from __future__ import unicode_literals, division, absolute_import, print_function
 
 __license__   = 'GPL v3'
-__copyright__ = '2011, Grant Drake <grant.drake@gmail.com>, 2016-2020 additions by David Forrester <davidfor@internode.on.net>'
-__docformat__ = 'restructuredtext en'
+__copyright__ = '2011, Grant Drake'
 
 import re, collections, copy
 from functools import partial
 
 # calibre Python 3 compatibility.
+from six import text_type as unicode
 try:
     from urllib.parse import quote_plus
-except ImportError as e:
+except ImportError:
     from urllib import quote_plus
-import six
-from six import text_type as unicode
 
+# Maintain backwards compatibility with older versions of Qt and calibre.
 try:
+    from qt.core import (Qt, QVBoxLayout, QLabel, QLineEdit, QApplication,
+                          QGroupBox, QHBoxLayout, QToolButton, QTableWidgetItem,
+                          QIcon, QTableWidget, QPushButton, QCheckBox,
+                          QAbstractItemView, QDialogButtonBox, QAction,
+                          QGridLayout, pyqtSignal, QUrl, QListWidget, QListWidgetItem,
+                          QTextEdit, QSplitter, QWidget)
+except ImportError:
     from PyQt5.Qt import (Qt, QVBoxLayout, QLabel, QLineEdit, QApplication,
                           QGroupBox, QHBoxLayout, QToolButton, QTableWidgetItem,
-                          QIcon, QTableWidget, QPushButton, QCheckBox, QSizePolicy,
+                          QIcon, QTableWidget, QPushButton, QCheckBox,
                           QAbstractItemView, QDialogButtonBox, QAction,
                           QGridLayout, pyqtSignal, QUrl, QListWidget, QListWidgetItem,
-                          QTextEdit)
-except ImportError:
-    from PyQt4.Qt import (Qt, QVBoxLayout, QLabel, QLineEdit, QApplication,
-                          QGroupBox, QHBoxLayout, QToolButton, QTableWidgetItem,
-                          QIcon, QTableWidget, QPushButton, QCheckBox, QSizePolicy,
-                          QAbstractItemView, QDialogButtonBox, QAction,
-                          QGridLayout, pyqtSignal, QUrl, QListWidget, QListWidgetItem,
-                          QTextEdit)
+                          QTextEdit, QSplitter, QWidget)
 
 from calibre.ebooks.metadata import MetaInformation
 from calibre.gui2 import error_dialog, question_dialog, gprefs, open_url
-from calibre.gui2.library.delegates import RatingDelegate
+from calibre.gui2.library.delegates import RatingDelegate, TextDelegate
 from calibre.utils.date import qt_to_dt, UNDEFINED_DATE
-from calibre import prints
+from calibre.devices.usbms.driver import debug_print
 
 import calibre_plugins.goodreads_sync.config as cfg
-from calibre_plugins.goodreads_sync.common_utils import (get_icon, SizePersistedDialog, ImageLabel,
-                                         ReadOnlyTableWidgetItem, ImageTitleLayout, ReadOnlyLineEdit,
-                                         DateDelegate, TextWithLengthDelegate, RatingTableWidgetItem, DateTableWidgetItem,
-                                         NumericTableWidgetItem, convert_qvariant, debug_print)
+from calibre_plugins.goodreads_sync.common_compatibility import qSizePolicy_Minimum, qtDropActionCopyAction, qtDropActionMoveAction
+from calibre_plugins.goodreads_sync.common_icons import get_icon, get_pixmap
+from calibre_plugins.goodreads_sync.common_dialogs import SizePersistedDialog
+from calibre_plugins.goodreads_sync.common_widgets import (DateDelegate, DateTableWidgetItem,
+                            ImageTitleLayout, ReadOnlyTableWidgetItem, ReadOnlyLineEdit, get_date_format)
 from calibre_plugins.goodreads_sync.core import update_calibre_isbn_if_required, get_searchable_author, CalibreDbHelper
 
 try:
-    debug_print("Goodreads Sync::dialogs.py - loading translations")
     load_translations()
 except NameError:
-    debug_print("Goodreads Sync::dialogs.py - exception when loading translations")
     pass # load_translations() added in calibre 1.9
+
+READ_SHELF = 'read'
+CURRENTLY_READING_SHELF = 'currently-reading'
+
+KEY_DISPLAY_ACTIVE_SHELVES = 'display_active_shelves'
+KEY_LAST_SELECTED_SHELVES = 'last_selected_shelves'
 
 SHOW_BOOK_URL_PREFIX = '%s/book/show/' % cfg.URL
 SHOW_BOOK_URL_PREFIX2 = '%s/book/show/' % cfg.URL_HTTPS
@@ -66,7 +67,55 @@ def get_urls_from_event(event):
         return [u for u in urls if u.startswith(SHOW_BOOK_URL_PREFIX) or u.startswith(SHOW_BOOK_URL_PREFIX2)]
 
 
+class TextWithLengthDelegate(TextDelegate):
+    '''
+    Override the calibre TextDelegate to set a maximum length.
+    '''
+    def __init__(self, parent, text_length=None):
+        super(TextWithLengthDelegate, self).__init__(parent)
+        self.text_length = text_length
+
+    def createEditor(self, parent, option, index):
+        editor = super(TextWithLengthDelegate, self).createEditor(parent, option, index)
+        if self.text_length:
+            editor.setMaxLength(self.text_length)
+        return editor
+
+
+class ImageLabel(QLabel):
+
+    def __init__(self, parent, icon_name, size=16):
+        super(ImageLabel,self).__init__(parent)
+        pixmap = get_pixmap(icon_name)
+        self.setPixmap(pixmap)
+        self.setMaximumSize(size, size)
+        self.setScaledContents(True)
+
+
+class NumericTableWidgetItem(QTableWidgetItem):
+
+    def __init__(self, number, is_read_only=False):
+        super(NumericTableWidgetItem, self).__init__('')
+        self.setData(Qt.DisplayRole, number)
+        if is_read_only:
+            self.setFlags(Qt.ItemIsSelectable|Qt.ItemIsEnabled)
+
+    def value(self):
+        return self.data(Qt.DisplayRole)
+
+
+class RatingTableWidgetItem(QTableWidgetItem):
+
+    def __init__(self, rating, is_read_only=False):
+        super(RatingTableWidgetItem, self).__init__('')
+        self.setData(Qt.DisplayRole, rating)
+        if is_read_only:
+            self.setFlags(Qt.ItemIsSelectable|Qt.ItemIsEnabled)
+
+
 class SwitchEditionTableWidget(QTableWidget):
+
+    book_selection_changed = pyqtSignal(object)
 
     def __init__(self, parent, id_caches, calibre_id):
         QTableWidget.__init__(self, parent)
@@ -137,10 +186,9 @@ class SwitchEditionTableWidget(QTableWidget):
         self.setItem(row, 2, ReadOnlyTableWidgetItem(goodreads_edition_book['goodreads_edition']))
 
     def item_selection_changed(self):
-        self.view_book_action.setEnabled(False)
-        row = self.currentRow()
-        if row >= 0:
-            self.view_book_action.setEnabled(True)
+        has_selected_book = self.selectionModel().hasSelection()
+        self.view_book_action.setEnabled(has_selected_book)
+        self.book_selection_changed.emit(has_selected_book)
 
     def paste_url(self):
         cb = QApplication.instance().clipboard()
@@ -150,15 +198,14 @@ class SwitchEditionTableWidget(QTableWidget):
 
     def selected_goodreads_book(self):
         row = self.selectionModel().selectedRows()[0]
-        return self.goodreads_edition_books[convert_qvariant(self.item(row.row(), 0).data(Qt.UserRole))]
+        return self.goodreads_edition_books[self.item(row.row(), 0).data(Qt.UserRole)]
 
     def view_book_on_goodreads(self):
         url = '%s/book/show/%s' % (cfg.URL, self.selected_goodreads_book()['goodreads_id'])
         open_url(QUrl(url))
 
     def dragEnterEvent(self, event):
-        if int(event.possibleActions() & Qt.CopyAction) + \
-           int(event.possibleActions() & Qt.MoveAction) == 0:
+        if not event.possibleActions() & (qtDropActionCopyAction | qtDropActionMoveAction):
             return
         urls = get_urls_from_event(event)
         if urls:
@@ -166,14 +213,14 @@ class SwitchEditionTableWidget(QTableWidget):
 
     def dropEvent(self, event):
         urls = get_urls_from_event(event)
-        event.setDropAction(Qt.CopyAction)
+        event.setDropAction(qtDropActionCopyAction)
         # User has dropped a valid Goodreads url onto our dialog.
         # Insert it as a fake row at the top
         url = urls[0]
         self.add_url_to_grid(url)
 
     def add_url_to_grid(self, url):
-        match = re.search('/show/(\d+)', url)
+        match = re.search(r'/show/(\d+)', url)
         if not match:
             return
         goodreads_id = match.group(1)
@@ -226,21 +273,22 @@ class SwitchEditionDialog(SizePersistedDialog):
                                                         calibre_book['calibre_id'])
         layout.addWidget(self.pick_book_table)
         self.pick_book_table.doubleClicked.connect(self.accept)
+        self.pick_book_table.book_selection_changed.connect(self.handle_book_selection_changed)
 
         message = _('You can drag/drop a Goodreads website link to add it to the results.')
         layout.addWidget(QLabel(message, self))
 
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        layout.addWidget(self.button_box)
 
         if enable_search:
-            search_button = button_box.addButton(_('Search Goodreads.com'), QDialogButtonBox.ResetRole)
+            search_button = self.button_box.addButton(_('Search Goodreads.com'), QDialogButtonBox.ResetRole)
             search_button.clicked.connect(self.search_on_goodreads)
         if next_book:
             self.skip_button = QPushButton(QIcon(I('forward.png')), _('Skip'), self)
-            button_box.addButton(self.skip_button, QDialogButtonBox.ActionRole)
+            self.button_box.addButton(self.skip_button, QDialogButtonBox.ActionRole)
             tip = _("Skip this book and move to the next:\n'{0}'").format(next_book)
             self.skip_button.setToolTip(tip)
             self.skip_button.clicked.connect(self.skip_triggered)
@@ -266,6 +314,10 @@ class SwitchEditionDialog(SizePersistedDialog):
         if not isinstance(url, bytes):
             url = url.encode('utf-8')
         open_url(QUrl.fromEncoded(url))
+
+    def handle_book_selection_changed(self, selection_is_not_valid):
+        ok_button = self.button_box.button(QDialogButtonBox.Ok)
+        ok_button.setEnabled(selection_is_not_valid)
 
     def selected_goodreads_book(self):
         book = self.pick_book_table.selected_goodreads_book()
@@ -300,7 +352,7 @@ class ChooseShelvesToSyncDialog(SizePersistedDialog):
         layout = QVBoxLayout(self)
         self.setLayout(layout)
 
-        self.default_prefs = { 'display_active_shelves': True, 'last_selected_shelves':[] }
+        self.default_prefs = { KEY_DISPLAY_ACTIVE_SHELVES: True, KEY_LAST_SELECTED_SHELVES:[] }
         other_prefs = gprefs.get(self.unique_pref_name+':other_prefs', self.default_prefs)
 
         self.values_list = QListWidget(self)
@@ -309,7 +361,7 @@ class ChooseShelvesToSyncDialog(SizePersistedDialog):
 
         self.display_active_shelves = QCheckBox(_('Show Active shelves only'))
         layout.addWidget(self.display_active_shelves)
-        self.display_active_shelves.setChecked(other_prefs.get('display_active_shelves',True))
+        self.display_active_shelves.setChecked(other_prefs.get(KEY_DISPLAY_ACTIVE_SHELVES,True))
         self.display_active_shelves.stateChanged[int].connect(self._display_active_shelves_changed)
 
         self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -317,7 +369,7 @@ class ChooseShelvesToSyncDialog(SizePersistedDialog):
         self.button_box.rejected.connect(self.reject)
         layout.addWidget(self.button_box)
 
-        self._display_shelves(other_prefs['last_selected_shelves'])
+        self._display_shelves(other_prefs[KEY_LAST_SELECTED_SHELVES])
 
         # Cause our dialog size to be restored from prefs or created on first usage
         self.resize_dialog()
@@ -342,8 +394,8 @@ class ChooseShelvesToSyncDialog(SizePersistedDialog):
 
     def _save_preferences(self):
         other_prefs = copy.deepcopy(self.default_prefs)
-        other_prefs['display_active_shelves'] = self.display_active_shelves.isChecked()
-        other_prefs['last_selected_shelves'] = self._get_selected_shelf_names()
+        other_prefs[KEY_DISPLAY_ACTIVE_SHELVES] = self.display_active_shelves.isChecked()
+        other_prefs[KEY_LAST_SELECTED_SHELVES] = self._get_selected_shelf_names()
         gprefs[self.unique_pref_name+':other_prefs'] = other_prefs
 
     def _get_selected_shelf_names(self):
@@ -364,7 +416,6 @@ class ChooseShelvesToSyncDialog(SizePersistedDialog):
             if shelf['name'] in self.selected_shelf_names:
                 self.selected_shelves.append(shelf)
         
-#         self.plugin_action.progressbar_show(len(self.selected_shelves)*10)
         self.plugin_action.progressbar_show(1)
         self.goodreads_shelf_books = self.grhttp.get_goodreads_books_on_shelves(self.user_name, self.selected_shelves)
         self.plugin_action.progressbar_hide()
@@ -388,6 +439,7 @@ class UpdateReadingProgressTableWidget(QTableWidget):
         self.itemSelectionChanged.connect(self.item_selection_changed)
         self.doubleClicked.connect(self.search_for_goodreads_books_click)
         self.header_labels = [_('Status'), _('Title'), _('Author'), _('Series'), _('Progress'), _('Comment'), _('Rating'), _('Date Read'), _('Review')]
+        self.format = get_date_format()
 
     def setMinimumColumnWidth(self, col, minimum):
         if self.columnWidth(col) < minimum:
@@ -395,7 +447,7 @@ class UpdateReadingProgressTableWidget(QTableWidget):
 
     def create_context_menu(self):
         self.setContextMenuPolicy(Qt.ActionsContextMenu)
-        self.search_action = QAction(get_icon('images/link_add.png'), _('Search for book in Goodreads...'), self)
+        self.search_action = QAction(get_icon('images/link_add.png'), _('Search for book in Goodreads')+'...', self)
         self.search_action.triggered.connect(self.search_for_goodreads_books_click)
         self.addAction(self.search_action)
         sep1 = QAction(self)
@@ -457,15 +509,13 @@ class UpdateReadingProgressTableWidget(QTableWidget):
         self.setItem(row, 4, NumericTableWidgetItem(progress, is_read_only=False))
         self.setItem(row, 5, QTableWidgetItem(''))
         if progress >= 100:
-            debug_print("populate_table_row: calibre_book['calibre_rating']=", calibre_book['calibre_rating'])
             self.setItem(row, 6, RatingTableWidgetItem(calibre_book['calibre_rating'], is_read_only=False))
             self.setItem(row, 7, DateTableWidgetItem(calibre_book['calibre_date_read'],
                                                      is_read_only=False, default_to_today=True))
             self.setItem(row, 8, QTableWidgetItem(calibre_book['calibre_review_text']))
         else:
             self.setItem(row, 6, RatingTableWidgetItem(0, is_read_only=True))
-            self.setItem(row, 7, DateTableWidgetItem('',
-                                                     is_read_only=True))
+            self.setItem(row, 7, DateTableWidgetItem(None, is_read_only=True, fmt=self.format))
             self.setItem(row, 8, NumericTableWidgetItem(''))
         
         self.setSortingEnabled(True)
@@ -475,31 +525,31 @@ class UpdateReadingProgressTableWidget(QTableWidget):
         if self.isColumnHidden(4) and self.isColumnHidden(5):
             return
         for row in range(self.rowCount()):
-            calibre_id = convert_qvariant(self.item(row, 1).data(Qt.UserRole))
+            calibre_id = self.item(row, 1).data(Qt.UserRole)
             for calibre_book in calibre_books:
                 if calibre_book['calibre_id'] == calibre_id:
-                    calibre_book['calibre_reading_progress'] = convert_qvariant(self.item(row, 4).data(Qt.DisplayRole))
-                    calibre_book['status_comment_text'] = unicode(convert_qvariant((self.item(row, 5).data(Qt.DisplayRole))))
+                    calibre_book['calibre_reading_progress'] = self.item(row, 4).data(Qt.DisplayRole)
+                    calibre_book['status_comment_text'] = self.item(row, 5).data(Qt.DisplayRole)
                     if not self.isColumnHidden(6):
-                        calibre_book['calibre_rating'] = convert_qvariant(self.item(row, 6).data(Qt.DisplayRole))
+                        calibre_book['calibre_rating'] = self.item(row, 6).data(Qt.DisplayRole)
                     if not self.isColumnHidden(7):
-                        qtdate = convert_qvariant(self.item(row, 7).data(Qt.DisplayRole))
+                        qtdate = self.item(row, 7).data(Qt.DisplayRole)
                         debug_print("update_books - qtdate='%s'" % qtdate)
                         if not qtdate == '':
                             calibre_book['calibre_date_read'] = qt_to_dt(qtdate, as_utc=False)
                     if not self.isColumnHidden(8):
-                        calibre_book['calibre_review_text'] = unicode(convert_qvariant((self.item(row, 8).data(Qt.DisplayRole))))
+                        calibre_book['calibre_review_text'] = self.item(row, 8).data(Qt.DisplayRole)
                     break
 
     def item_selection_changed(self):
         selection_has_no_goodreads_id = True
         selection_is_not_valid = True
-        if self.currentRow() < 0:
+        if not self.selectionModel().hasSelection():
             selection_has_no_goodreads_id = False
             selection_is_not_valid = False
         else:
             for row in self.selectionModel().selectedRows():
-                calibre_book_id = convert_qvariant(self.item(row.row(), 2).data(Qt.UserRole))
+                calibre_book_id = self.item(row.row(), 2).data(Qt.UserRole)
                 calibre_book = self.calibre_books[calibre_book_id]
                 if calibre_book['status'] == ActionStatus.VALID:
                     selection_is_not_valid = False
@@ -511,7 +561,7 @@ class UpdateReadingProgressTableWidget(QTableWidget):
 
     def view_book_on_goodreads_click(self):
         for row in self.selectionModel().selectedRows():
-            calibre_book_id = convert_qvariant(self.item(row.row(), 2).data(Qt.UserRole))
+            calibre_book_id = self.item(row.row(), 2).data(Qt.UserRole)
             calibre_book = self.calibre_books[calibre_book_id]
             self.view_book.emit(calibre_book['goodreads_id'])
 
@@ -519,7 +569,7 @@ class UpdateReadingProgressTableWidget(QTableWidget):
         rows = []
         calibre_books_to_search = []
         for row in self.selectionModel().selectedRows():
-            calibre_book_id = convert_qvariant(self.item(row.row(), 2).data(Qt.UserRole))
+            calibre_book_id = self.item(row.row(), 2).data(Qt.UserRole)
             calibre_book = self.calibre_books[calibre_book_id]
             if calibre_book['status'] != ActionStatus.VALID:
                 rows.append(row.row())
@@ -529,15 +579,11 @@ class UpdateReadingProgressTableWidget(QTableWidget):
         self.search_for_goodreads_books.emit(rows, calibre_books_to_search)
 
     def show_columns(self, is_rating_visible, is_dateread_visible, is_reviewtext_visible):
-        debug_print("UpdateReadingProgressTableWidget::show_columns - ", is_rating_visible, is_dateread_visible, is_reviewtext_visible)
         if self.rating_column:
-            debug_print("UpdateReadingProgressTableWidget::show_columns - rating_column", is_rating_visible)
             self.setColumnHidden(6, not is_rating_visible)
         if self.date_read_column:
-            debug_print("UpdateReadingProgressTableWidget::show_columns - date_read_column", is_dateread_visible)
             self.setColumnHidden(7, not is_dateread_visible)
         if self.review_text_column:
-            debug_print("UpdateReadingProgressTableWidget::show_columns - review_text_column", is_reviewtext_visible)
             self.setColumnHidden(8, not is_reviewtext_visible)
 
 
@@ -551,7 +597,7 @@ class UpdateReadingProgressDialog(SizePersistedDialog):
         self.grhttp, self.id_caches, self.user_name, self.action, self.calibre_books = \
             (grhttp, id_caches, user_name, action, calibre_books)
         self.update_isbn = cfg.plugin_prefs[cfg.STORE_PLUGIN].get(cfg.KEY_UPDATE_ISBN, 'NEVER')
-        self.default_prefs = { 'display_active_shelves': True, 'last_selected_shelves':[] }
+        self.default_prefs = { KEY_DISPLAY_ACTIVE_SHELVES: True, KEY_LAST_SELECTED_SHELVES:[] }
         self.reading_progress_column = cfg.plugin_prefs[cfg.STORE_PLUGIN].get(cfg.KEY_READING_PROGRESS_COLUMN, '')
         self.rating_column = cfg.plugin_prefs[cfg.STORE_PLUGIN].get(cfg.KEY_RATING_COLUMN, '')
         self.date_read_column = cfg.plugin_prefs[cfg.STORE_PLUGIN].get(cfg.KEY_DATE_READ_COLUMN, '')
@@ -560,7 +606,6 @@ class UpdateReadingProgressDialog(SizePersistedDialog):
         self.is_rating_visible = False
         self.is_dateread_visible = False
         self.is_review_text_visible = False
-        self.read_shelf_name = 'read'
         self.plugin_action = plugin_action
 
         user_info = cfg.plugin_prefs[cfg.STORE_USERS].get(user_name)
@@ -608,20 +653,16 @@ class UpdateReadingProgressDialog(SizePersistedDialog):
         self.summary_table.search_for_goodreads_books.connect(self.handle_search_for_goodreads_books)
         self.summary_table.book_selection_changed.connect(self.handle_book_selection_changed)
         grid_layout.addWidget(self.summary_table, 1, 0, 1, 2)
-#        grid_layout.setColumnStretch(0, 1)
-#        grid_layout.setColumnStretch(1, 4)
 
         check_box_layout = QHBoxLayout()
         layout.addLayout(check_box_layout)
         self.put_reading_on_currently_reading_shelf = QCheckBox(_('Put books on currently-reading shelf'))
-        self.put_reading_on_currently_reading_shelf.setToolTip(_("If the reading progress is being updated, but the books is not finished, put the books onto the 'currently-reading' shelf."))
-#         grid_layout.addWidget(self.put_reading_on_currently_reading_shelf, 2, 0, 1, 1)
+        self.put_reading_on_currently_reading_shelf.setToolTip(_("If the reading progress is being updated, but the books are not finished, put the books onto the 'currently-reading' shelf."))
         check_box_layout.addWidget(self.put_reading_on_currently_reading_shelf)
         self.put_reading_on_currently_reading_shelf.setChecked(other_prefs.get('put_reading_on_currently_reading_shelf',True))
 
-        self.put_finished_on_read_shelf = QCheckBox(_('Put Finished books on read shelf'))
+        self.put_finished_on_read_shelf = QCheckBox(_('Put finished books on read shelf'))
         self.put_finished_on_read_shelf.setToolTip(_("If the reading progress is 100%, put the books onto the 'read' shelf."))
-#         grid_layout.addWidget(self.put_finished_on_read_shelf, 2, 1, 1, 1)
         check_box_layout.addWidget(self.put_finished_on_read_shelf)
         self.put_finished_on_read_shelf.setChecked(other_prefs.get('put_finished_on_read_shelf',True))
         self.put_finished_on_read_shelf.clicked.connect(self.put_finished_on_read_shelf_clicked)
@@ -629,7 +670,7 @@ class UpdateReadingProgressDialog(SizePersistedDialog):
         check_box_layout.addStretch()
 
         button_box = QDialogButtonBox()
-        self.search_button = button_box.addButton( _('Search Goodreads...'), QDialogButtonBox.ResetRole)
+        self.search_button = button_box.addButton( _('Search Goodreads')+'...', QDialogButtonBox.ResetRole)
         self.search_button.clicked.connect(self.summary_table.search_for_goodreads_books_click)
         self.search_button.setEnabled(False)
         action_button_name = _('Update Progress')
@@ -696,14 +737,13 @@ class UpdateReadingProgressDialog(SizePersistedDialog):
         return self.put_finished_on_read_shelf.checkState() == Qt.Checked
 
     def put_finished_on_read_shelf_clicked(self, checked):
-        self.is_rating_visible = self.shelves_map[self.read_shelf_name].get(cfg.KEY_ADD_RATING, False) and checked
-        self.is_dateread_visible = self.shelves_map[self.read_shelf_name].get(cfg.KEY_ADD_DATE_READ, False) and checked
-        self.is_review_text_visible = self.shelves_map[self.read_shelf_name].get(cfg.KEY_ADD_REVIEW_TEXT, False) and checked
+        self.is_rating_visible = self.shelves_map[READ_SHELF].get(cfg.KEY_ADD_RATING, False) and checked
+        self.is_dateread_visible = self.shelves_map[READ_SHELF].get(cfg.KEY_ADD_DATE_READ, False) and checked
+        self.is_review_text_visible = self.shelves_map[READ_SHELF].get(cfg.KEY_ADD_REVIEW_TEXT, False) and checked
 
         self.summary_table.show_columns(self.is_rating_visible, self.is_dateread_visible, self.is_review_text_visible)
         
     def action_button_clicked(self):
-        debug_print("UpdateReadingProgressDialog::action_button_clicked - start")
         self.save_preferences()
         self.action_button.setEnabled(False)
 
@@ -712,50 +752,43 @@ class UpdateReadingProgressDialog(SizePersistedDialog):
 
         client = self.grhttp.create_oauth_client(self.user_name)
         upload_progress = self.action == 'progress' and len(self.reading_progress_column) > 0
-        debug_print("action_button_clicked - self.rating_column=", self.rating_column)
         upload_rating = self.is_rating_visible and len(self.rating_column) > 0
-        debug_print("action_button_clicked - upload_rating=", upload_rating)
         upload_date_read = self.is_dateread_visible and len(self.date_read_column) > 0
         upload_review_text = self.is_review_text_visible and len(self.review_text_column) > 0
-        added_books = []
-        self.plugin_action.progressbar_label(_("Updating Goodreads progress..."))
+        currently_reading_books = []
+        read_books = []
+        self.plugin_action.progressbar_label(_('Updating Goodreads progress')+'...')
         self.plugin_action.progressbar_show(len(self.calibre_books))
         # Add/remove each linked book to the selected shelf
         for calibre_book in self.calibre_books:
-            debug_print("UpdateReadingProgressDialog::action_button_clicked - calibre_book=", calibre_book)
             self.plugin_action.progressbar_increment()
             if calibre_book['status'] == ActionStatus.VALID:
-                debug_print("UpdateReadingProgressDialog::action_button_clicked - valid action")
                 goodreads_id = calibre_book['goodreads_id']
                 progress = int(calibre_book['calibre_reading_progress']) if calibre_book['calibre_reading_progress'] else None
                 progress = progress if progress >=0 else None
-                review_text = calibre_book['status_comment_text'] if len(calibre_book['status_comment_text']) > 0 else None 
+                review_text = None
+                calibre_book['status_comment_text'] if len(calibre_book.get('status_comment_text','')) > 0 else None 
                 self.grhttp.update_status(client, goodreads_id, progress, self.progress_is_percent, review_text)
                 if (upload_progress and progress):
-                    debug_print("UpdateReadingProgressDialog::action_button_clicked - valid action")
                     calibre_book['goodreads_reading_progress'] = progress
-                    added_books.append(calibre_book)
 
                     if self.put_reading_on_currently_reading_shelf_checked and progress < 100:
-                        debug_print("UpdateReadingProgressDialog::action_button_clicked - putting book on 'currently-reading' shelf")
-                        review_id = self.grhttp.add_remove_book_to_shelf(client, "currently-reading", goodreads_id, 'add')
+                        currently_reading_books.append(calibre_book)
+                        review_id = self.grhttp.add_remove_book_to_shelf(client, CURRENTLY_READING_SHELF, goodreads_id, 'add')
 
                     if self.put_finished_on_read_shelf_checked and progress >= 100:
-                        debug_print("UpdateReadingProgressDialog::action_button_clicked - putting book on 'read' shelf")
-                        review_id = self.grhttp.add_remove_book_to_shelf(client, self.read_shelf_name, goodreads_id, 'add')
+                        read_books.append(calibre_book)
+                        review_id = self.grhttp.add_remove_book_to_shelf(client, READ_SHELF, goodreads_id, 'add')
                         # If adding books and rating/date read columns update the Goodreads review
                         if review_id:
                             if review_id and (upload_rating or upload_date_read or upload_review_text):
-                                debug_print("UpdateReadingProgressDialog::action_button_clicked - updating review")
                                 rating = None
                                 date_read = None
                                 review_text = None
                                 if upload_rating:
                                     rating = int(calibre_book['calibre_rating']) / 2
-                                    debug_print("action_button_clicked - rating=", rating)
                                     if rating:
                                         calibre_book['goodreads_rating'] = rating
-                                        debug_print("action_button_clicked - calibre_book['goodreads_rating']=", calibre_book['goodreads_rating'])
                                 if upload_date_read:
                                     date_read = calibre_book['calibre_date_read']
                                     if date_read:
@@ -764,32 +797,36 @@ class UpdateReadingProgressDialog(SizePersistedDialog):
                                     review_text = calibre_book['calibre_review_text']
                                     if review_text:
                                         calibre_book['goodreads_review_text'] = review_text
-                                self.grhttp.update_review(client, self.read_shelf_name, review_id, goodreads_id, rating, date_read, review_text)
-        # Finally, apply any "add" actions to books that were added to shelf
-        if len(added_books) > 0:
-            add_actions = []
-            # Include some actions for setting our rating/date read/review text if appropriate
-            if upload_progress:
-                update_progress_action = {'action':'ADD', 'column':self.reading_progress_column, 'value':'goodreads_reading_progress'}
-                add_actions.append(update_progress_action)
-                if self.put_finished_on_read_shelf_checked:
-                    if upload_rating:
-                        update_rating_action = {'action':'ADD', 'column':self.rating_column, 'value':'goodreads_rating'}
-                        add_actions.append(update_rating_action)
-                    if upload_date_read:
-                        upload_date_read_action = {'action':'ADD', 'column':self.date_read_column, 'value':'read_at'}
-                        add_actions.append(upload_date_read_action)
-                    if upload_review_text:
-                        upload_review_text_action = {'special':'review_text', 'action':'ADD', 'column':self.review_text_column, 'value':''}
-                        add_actions.append(upload_review_text_action)
-                    add_actions.extend(self.shelves_map[self.read_shelf_name].get(cfg.KEY_ADD_ACTIONS,[]))
-            if len(add_actions) > 0:
-                debug_print("action_button_clicked - add_actions=", add_actions)
-                self.plugin_action.progressbar_label(_("Updating books in calibre..."))
-                CalibreDbHelper().apply_actions_to_calibre(self.gui, added_books, add_actions)
+                                self.grhttp.update_review(client, READ_SHELF, review_id, goodreads_id, rating, date_read, review_text)
+        # Finally, apply any "add" actions to books that were added to shelves
+        if len(currently_reading_books) > 0:
+            self._apply_add_actions_for_books(currently_reading_books, CURRENTLY_READING_SHELF, upload_progress)
+        if len(read_books) > 0:
+            self._apply_add_actions_for_books(read_books, READ_SHELF, upload_progress, upload_rating, upload_date_read, upload_review_text)
 
         self.accept()
         self.plugin_action.progressbar_hide()
+    
+    def _apply_add_actions_for_books(self, added_books, shelf_name, upload_progress, upload_rating=None, upload_date_read=None, upload_review_text=None):
+        add_actions = []
+        # Include some actions for setting our rating/date read/review text if appropriate
+        if upload_progress:
+            update_progress_action = {'action':'ADD', 'column':self.reading_progress_column, 'value':'goodreads_reading_progress'}
+            add_actions.append(update_progress_action)
+            if self.put_finished_on_read_shelf_checked:
+                if upload_rating:
+                    update_rating_action = {'action':'ADD', 'column':self.rating_column, 'value':'goodreads_rating'}
+                    add_actions.append(update_rating_action)
+                if upload_date_read:
+                    upload_date_read_action = {'action':'ADD', 'column':self.date_read_column, 'value':'read_at'}
+                    add_actions.append(upload_date_read_action)
+                if upload_review_text:
+                    upload_review_text_action = {'special':'review_text', 'action':'ADD', 'column':self.review_text_column, 'value':''}
+                    add_actions.append(upload_review_text_action)
+                add_actions.extend(self.shelves_map[shelf_name].get(cfg.KEY_ADD_ACTIONS,[]))
+        if len(add_actions) > 0:
+            self.plugin_action.progressbar_label(_("Updating books in calibre..."))
+            CalibreDbHelper().apply_actions_to_calibre(self.gui, added_books, add_actions)
 
     def save_preferences(self):
         other_prefs = copy.deepcopy(self.default_prefs)
@@ -859,8 +896,7 @@ class CalibreTitleWidgetItem(SortableReadOnlyTableWidgetItem):
                 self.setToolTip(_('You are already linked to this calibre book'))
             else:
                 self.setIcon(get_icon('dialog_warning.png'))
-                self.setToolTip(_('This calibre book is linked to a different Goodreads book.\n' + \
-                                'Do you have a duplicate in calibre or your Goodreads shelf?'))
+                self.setToolTip(_('This calibre book is linked to a different Goodreads book.'))
 
 
 class GoodreadsTitleWidgetItem(ReadOnlyTableWidgetItem):
@@ -873,8 +909,7 @@ class GoodreadsTitleWidgetItem(ReadOnlyTableWidgetItem):
                 self.setToolTip(_('You have already linked to this Goodreads book'))
             else:
                 self.setIcon(get_icon('dialog_warning.png'))
-                self.setToolTip(_('This Goodreads book is linked to a different calibre book.\n' + \
-                                'Do you have a duplicate in calibre or your Goodreads shelf?'))
+                self.setToolTip(_('This Goodreads book is linked to a different calibre book.'))
 
 
 class StatusDataWidgetItem(ReadOnlyTableWidgetItem):
@@ -893,7 +928,7 @@ class StatusDataWidgetItem(ReadOnlyTableWidgetItem):
         self.setData(20, status)
 
     def get_status(self):
-        return self.data(20).toPyObject()
+        return self.data(20)
 
 
 class SyncStatusDataWidgetItem(StatusDataWidgetItem):
@@ -902,16 +937,18 @@ class SyncStatusDataWidgetItem(StatusDataWidgetItem):
                  ActionStatus.VALID: 'ok.png',
                  ActionStatus.ADD_EMPTY: 'add_book.png' }
 
-    TOOLTIP_MAP = { ActionStatus.NO_LINK: _('You must link this Goodreads book to a matching book in calibre \n' + \
-                                        'in order for any sync actions to be applied'),
-                    ActionStatus.WARNING: _('No actions have been set for this shelf.\n' + \
-                                          'Use \'Customize plugin\' to specify the actions'),
+    TOOLTIP_MAP = { ActionStatus.NO_LINK: _("You must link this Goodreads book to a matching book in calibre \n"
+                                        "in order for any sync actions to be applied"),
+                    ActionStatus.WARNING: _("No actions have been set for this shelf.\n"
+                                          "Use 'Customize plugin' to specify the actions"),
                     ActionStatus.VALID: _('Actions will be applied when you click Sync Now'),
-                    ActionStatus.ADD_EMPTY: _('An empty book will be created in calibre for this book \n' + \
-                                            'using the Goodreads metadata') }
+                    ActionStatus.ADD_EMPTY: _("An empty book will be created in calibre for this book \n"
+                                            "using the Goodreads metadata") }
 
 
 class PickGoodreadsBookTableWidget(QTableWidget):
+
+    book_selection_changed = pyqtSignal(object)
 
     def __init__(self, parent, id_caches, calibre_id):
         QTableWidget.__init__(self, parent)
@@ -983,10 +1020,9 @@ class PickGoodreadsBookTableWidget(QTableWidget):
         self.setItem(row, 2, ReadOnlyTableWidgetItem(goodreads_search_book['goodreads_series']))
 
     def item_selection_changed(self):
-        self.view_book_action.setEnabled(False)
-        row = self.currentRow()
-        if row >= 0:
-            self.view_book_action.setEnabled(True)
+        has_selected_book = self.selectionModel().hasSelection()
+        self.view_book_action.setEnabled(has_selected_book)
+        self.book_selection_changed.emit(has_selected_book)
 
     def paste_url(self):
         cb = QApplication.instance().clipboard()
@@ -995,8 +1031,10 @@ class PickGoodreadsBookTableWidget(QTableWidget):
             self.add_url_to_grid(txt)
 
     def selected_goodreads_book(self):
+        if not self.selectionModel().hasSelection():
+            return
         row = self.selectionModel().selectedRows()[0]
-        row = convert_qvariant(self.item(row.row(), 0).data(Qt.UserRole))
+        row = self.item(row.row(), 0).data(Qt.UserRole)
         if row >= 0:
             return self.goodreads_search_books[row]
 
@@ -1005,8 +1043,7 @@ class PickGoodreadsBookTableWidget(QTableWidget):
         open_url(QUrl(url))
 
     def dragEnterEvent(self, event):
-        if int(event.possibleActions() & Qt.CopyAction) + \
-           int(event.possibleActions() & Qt.MoveAction) == 0:
+        if not event.possibleActions() & (qtDropActionCopyAction | qtDropActionMoveAction):
             return
         urls = get_urls_from_event(event)
         if urls:
@@ -1014,14 +1051,14 @@ class PickGoodreadsBookTableWidget(QTableWidget):
 
     def dropEvent(self, event):
         urls = get_urls_from_event(event)
-        event.setDropAction(Qt.CopyAction)
+        event.setDropAction(qtDropActionCopyAction)
         # User has dropped a valid Goodreads url onto our dialog.
         # Insert it as a fake row at the top
         url = urls[0]
         self.add_url_to_grid(url)
 
     def add_url_to_grid(self, url):
-        match = re.search('/show/(\d+)', url)
+        match = re.search(r'/show/(\d+)', url)
         if not match:
             return
         goodreads_id = match.group(1)
@@ -1076,29 +1113,31 @@ class PickGoodreadsBookDialog(SizePersistedDialog):
                                                             calibre_book['calibre_id'])
         layout.addWidget(self.pick_book_table)
         self.pick_book_table.doubleClicked.connect(self.accept)
+        self.pick_book_table.book_selection_changed.connect(self.handle_book_selection_changed)
 
         message = _('You can drag/drop a Goodreads website link to add it to the results.')
         layout.addWidget(QLabel(message, self))
 
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        layout.addWidget(self.button_box)
 
-        self.editions_button = button_box.addButton(_('Switch Edition'), QDialogButtonBox.ResetRole)
+        self.editions_button = self.button_box.addButton(_('Switch Edition'), QDialogButtonBox.ResetRole)
         self.editions_button.clicked.connect(self.switch_editions)
 
-        search_button = button_box.addButton(_('Search Goodreads.com'), QDialogButtonBox.ResetRole)
+        search_button = self.button_box.addButton(_('Search Goodreads.com'), QDialogButtonBox.ResetRole)
         search_button.clicked.connect(self.search_on_goodreads)
         if next_book:
             self.skip_button = QPushButton(QIcon(I('forward.png')), _('Skip'), self)
-            button_box.addButton(self.skip_button, QDialogButtonBox.ActionRole)
+            self.button_box.addButton(self.skip_button, QDialogButtonBox.ActionRole)
             tip = _("Skip this book and move to the next:\n'{0}'").format(next_book)
             self.skip_button.setToolTip(tip)
             self.skip_button.clicked.connect(self.skip_triggered)
 
         # Populate with data
         self.pick_book_table.populate_table(goodreads_books)
+        self.handle_book_selection_changed(len(goodreads_books) > 0)
         # Cause our dialog size to be restored from prefs or created on first usage
         self.resize_dialog()
 
@@ -1118,6 +1157,11 @@ class PickGoodreadsBookDialog(SizePersistedDialog):
         if not isinstance(url, bytes):
             url = url.encode('utf-8')
         open_url(QUrl.fromEncoded(url))
+
+    def handle_book_selection_changed(self, selection_is_not_valid):
+        ok_button = self.button_box.button(QDialogButtonBox.Ok)
+        ok_button.setEnabled(selection_is_not_valid)
+        self.editions_button.setEnabled(selection_is_not_valid)
 
     def selected_goodreads_book(self):
         return self.pick_book_table.selected_goodreads_book()
@@ -1153,6 +1197,7 @@ class PickGoodreadsBookDialog(SizePersistedDialog):
         goodreads_book['goodreads_title'] = new_goodreads_book['goodreads_title']
         row = self.pick_book_table.currentRow()
         self.pick_book_table.populate_table_row(row, goodreads_book)
+
 
 class PickCalibreBookTableWidget(QTableWidget):
 
@@ -1214,7 +1259,7 @@ class PickCalibreBookTableWidget(QTableWidget):
         selected_books = []
         for row in self.selectionModel().selectedRows():
             row = self.selectionModel().selectedRows()[0]
-            book_id = convert_qvariant(self.item(row.row(), 0).data(Qt.UserRole))
+            book_id = self.item(row.row(), 0).data(Qt.UserRole)
             selected_books.append(self.calibre_books[book_id])
         return selected_books
 
@@ -1279,7 +1324,7 @@ class PickCalibreBookDialog(SizePersistedDialog):
         author_label.setBuddy(self.author_ledit)
 
         self.search_button = QPushButton(_('&Go!'), self)
-        self.search_button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Minimum)
+        self.search_button.setSizePolicy(qSizePolicy_Minimum, qSizePolicy_Minimum)
         self.search_button.clicked.connect(self.search_click)
         self.search_button.setToolTip(_('Search again using this title/author'))
         self.clear_title_button = QToolButton(self)
@@ -1345,10 +1390,10 @@ class PickCalibreBookDialog(SizePersistedDialog):
         if not goodreads_id or goodreads_id == self.goodreads_book['goodreads_id']:
             self.accept()
             return
-        if not question_dialog(self, 'Overwrite Goodreads Link',
-                _('This calibre book is already linked to a different Goodreads book. ' + \
-                'Only one Goodreads book can be linked to a calibre book at a time.<p><p>' + \
-                'Click Yes to overwrite the link to this book, No to Cancel'), show_copy_button=False):
+        if not question_dialog(self, _('Overwrite Goodreads Link'), \
+                _('This calibre book is already linked to a different Goodreads book.')+'<p>'+ \
+                _('Only one Goodreads book can be linked to a calibre book at a time.')+'<p><p>'+ \
+                _('Click Yes to overwrite the link to this book, No to Cancel'), show_copy_button=False):
             return
         self.accept()
 
@@ -1378,7 +1423,7 @@ class DoAddRemoveTableWidget(QTableWidget):
 
     def create_context_menu(self):
         self.setContextMenuPolicy(Qt.ActionsContextMenu)
-        self.search_action = QAction(get_icon('images/link_add.png'), _('Search for book in Goodreads...'), self)
+        self.search_action = QAction(get_icon('images/link_add.png'), _('Search for book in Goodreads')+'...', self)
         self.search_action.triggered.connect(self.search_for_goodreads_books_click)
         self.addAction(self.search_action)
         sep1 = QAction(self)
@@ -1397,7 +1442,7 @@ class DoAddRemoveTableWidget(QTableWidget):
         self.setHorizontalHeaderLabels(self.header_labels)
         self.verticalHeader().setDefaultSectionSize(24)
 
-        # We need to resort the supplied data using the status attribute in the dictionary
+        # We need to re-sort the supplied data using the status attribute in the dictionary
         self.calibre_books = sorted(calibre_books, key=lambda k: k['status'])
         for row, book in enumerate(self.calibre_books):
             self.populate_table_row(row, book)
@@ -1408,7 +1453,7 @@ class DoAddRemoveTableWidget(QTableWidget):
 
         delegate = RatingDelegate(self)
         self.setItemDelegateForColumn(4, delegate)
-        self.setMinimumColumnWidth(4, 80)
+        self.setMinimumColumnWidth(4, 90)
         delegate = DateDelegate(self)
         self.setItemDelegateForColumn(5, delegate)
         self.setColumnHidden(4, True)
@@ -1443,16 +1488,17 @@ class DoAddRemoveTableWidget(QTableWidget):
         if self.isColumnHidden(4) and self.isColumnHidden(5):
             return
         for row in range(self.rowCount()):
-            calibre_id = convert_qvariant(self.item(row, 1).data(Qt.UserRole))
+            calibre_id = self.item(row, 1).data(Qt.UserRole)
             for calibre_book in calibre_books:
                 if calibre_book['calibre_id'] == calibre_id:
                     if not self.isColumnHidden(4):
-                        calibre_book['calibre_rating'] = convert_qvariant(self.item(row, 4).data(Qt.DisplayRole))
+                        calibre_book['calibre_rating'] = self.item(row, 4).data(Qt.DisplayRole)
                     if not self.isColumnHidden(5):
-                        qtdate = convert_qvariant(self.item(row, 5).data(Qt.DisplayRole))
+                        qtdate = self.item(row, 5).data(Qt.DisplayRole)
+                        debug_print("update_books - qtdate='%s'" % qtdate)
                         calibre_book['calibre_date_read'] = qt_to_dt(qtdate, as_utc=False)
                     if not self.isColumnHidden(6):
-                        calibre_book['calibre_review_text'] = unicode(convert_qvariant((self.item(row, 6).data(Qt.DisplayRole))))
+                        calibre_book['calibre_review_text'] = unicode(self.item(row, 6).data(Qt.DisplayRole))
                     break
 
     def show_columns(self, is_rating_visible, is_dateread_visible, is_reviewtext_visible):
@@ -1466,12 +1512,12 @@ class DoAddRemoveTableWidget(QTableWidget):
     def item_selection_changed(self):
         selection_has_no_goodreads_id = True
         selection_is_not_valid = True
-        if self.currentRow() < 0:
+        if not self.selectionModel().hasSelection():
             selection_has_no_goodreads_id = False
             selection_is_not_valid = False
         else:
             for row in self.selectionModel().selectedRows():
-                calibre_book_id = convert_qvariant(self.item(row.row(), 2).data(Qt.UserRole))
+                calibre_book_id = self.item(row.row(), 2).data(Qt.UserRole)
                 calibre_book = self.calibre_books[calibre_book_id]
                 if calibre_book['status'] == ActionStatus.VALID:
                     selection_is_not_valid = False
@@ -1490,7 +1536,7 @@ class DoAddRemoveTableWidget(QTableWidget):
         rows = []
         calibre_books_to_search = []
         for row in self.selectionModel().selectedRows():
-            calibre_book_id = convert_qvariant(self.item(row.row(), 2).data(Qt.UserRole))
+            calibre_book_id = self.item(row.row(), 2).data(Qt.UserRole)
             calibre_book = self.calibre_books[calibre_book_id]
             if calibre_book['status'] != ActionStatus.VALID:
                 rows.append(row.row())
@@ -1510,7 +1556,7 @@ class DoAddRemoveDialog(SizePersistedDialog):
         self.grhttp, self.id_caches, self.user_name, self.action, self.calibre_books = \
             (grhttp, id_caches, user_name, action, calibre_books)
         self.update_isbn = cfg.plugin_prefs[cfg.STORE_PLUGIN].get(cfg.KEY_UPDATE_ISBN, 'NEVER')
-        self.default_prefs = { 'display_active_shelves': True, 'last_selected_shelves':[] }
+        self.default_prefs = { KEY_DISPLAY_ACTIVE_SHELVES: True, KEY_LAST_SELECTED_SHELVES:[] }
         self.rating_column = cfg.plugin_prefs[cfg.STORE_PLUGIN].get(cfg.KEY_RATING_COLUMN, '')
         self.date_read_column = cfg.plugin_prefs[cfg.STORE_PLUGIN].get(cfg.KEY_DATE_READ_COLUMN, '')
         self.review_text_column = cfg.plugin_prefs[cfg.STORE_PLUGIN].get(cfg.KEY_REVIEW_TEXT_COLUMN, '')
@@ -1570,7 +1616,7 @@ class DoAddRemoveDialog(SizePersistedDialog):
         grid_layout.addWidget(self.values_list, 1, 0)
         self.display_active_shelves = QCheckBox(_('Show Active shelves only'))
         grid_layout.addWidget(self.display_active_shelves, 2, 0)
-        self.display_active_shelves.setChecked(other_prefs.get('display_active_shelves',True))
+        self.display_active_shelves.setChecked(other_prefs.get(KEY_DISPLAY_ACTIVE_SHELVES,True))
         self.display_active_shelves.stateChanged[int].connect(self.display_active_shelves_changed)
 
         self.summary_table = DoAddRemoveTableWidget(self, self.rating_column, self.date_read_column, self.review_text_column)
@@ -1604,7 +1650,7 @@ class DoAddRemoveDialog(SizePersistedDialog):
         upload_layout.addWidget(self.review_text_label)
 
         button_box = QDialogButtonBox()
-        self.search_button = button_box.addButton( _('Search Goodreads...'), QDialogButtonBox.ResetRole)
+        self.search_button = button_box.addButton( _('Search Goodreads')+'...', QDialogButtonBox.ResetRole)
         self.search_button.clicked.connect(self.summary_table.search_for_goodreads_books_click)
         self.search_button.setEnabled(False)
         action_button_name = _('Add to Shelf') if self.action == 'add' else _('Remove from Shelf')
@@ -1615,7 +1661,7 @@ class DoAddRemoveDialog(SizePersistedDialog):
         self.cancel_button.clicked.connect(self.reject)
         layout.addWidget(button_box)
 
-        self.display_shelves(other_prefs['last_selected_shelves'])
+        self.display_shelves(other_prefs[KEY_LAST_SELECTED_SHELVES])
 
         self.resize(self.sizeHint())
 
@@ -1726,16 +1772,16 @@ class DoAddRemoveDialog(SizePersistedDialog):
 
         if exclusive_count > 0 and self.action == 'remove':
             if not question_dialog(self.gui, _('Exclusive Shelf Warning'), '<p>' +
-                _('You are about to remove from a shelf marked as exclusive. ' +
-                'This will result in these books being <b>moved</b> to one of your other ' +
-                'shelves rather than being deleted from all shelves.<p>' +
-                'Do you want to continue?'), show_copy_button=False):
+                _('You are about to remove from a shelf marked as exclusive.')+'<p>'+
+                _("This will result in these books being <b>moved</b> to one of your other "
+                "shelves rather than being deleted from all shelves.")+'<p>' +
+                _('Do you want to continue?'), show_copy_button=False):
                 return False
 
         if self.error_count > 0:
             if not question_dialog(self, _('Are you sure?'), '<p>'+
-                    _('There are books in this list not yet linked to calibre which will be ignored.<p><p>'+
-                    'Are you sure you want to continue?'),
+                    _('There are books in this list not yet linked to calibre which will be ignored.')+'<p><p>'+
+                    _('Do you want to continue?'),
                     show_copy_button=False):
                 return
 
@@ -1756,6 +1802,9 @@ class DoAddRemoveDialog(SizePersistedDialog):
                 goodreads_id = calibre_book['goodreads_id']
                 for shelf_name in selected_shelves:
                     review_id = self.grhttp.add_remove_book_to_shelf(client, shelf_name, goodreads_id, self.action)
+                    if not review_id:
+                        # Could have had a Goodreads failure, stop immediately.
+                        break
                 # If adding books and rating/date read columns update the Goodreads review
                 if review_id and self.action == 'add':
                     added_books.append(calibre_book)
@@ -1773,6 +1822,9 @@ class DoAddRemoveDialog(SizePersistedDialog):
                             review_text = calibre_book['calibre_review_text']
                             calibre_book['goodreads_review_text'] = review_text
                         self.grhttp.update_review(client, shelf_name, review_id, goodreads_id, rating, date_read, review_text)
+                if not review_id:
+                    # Don't keep trying to add books
+                    break
 
         # Finally, apply any "add" actions to books that were added to shelf
         if len(added_books) > 0:
@@ -1796,13 +1848,12 @@ class DoAddRemoveDialog(SizePersistedDialog):
 
     def save_preferences(self):
         other_prefs = copy.deepcopy(self.default_prefs)
-        other_prefs['display_active_shelves'] = self.display_active_shelves.isChecked()
-        other_prefs['last_selected_shelves'] = self._get_selected_shelf_names()
+        other_prefs[KEY_DISPLAY_ACTIVE_SHELVES] = self.display_active_shelves.isChecked()
+        other_prefs[KEY_LAST_SELECTED_SHELVES] = self._get_selected_shelf_names()
         gprefs[self.unique_pref_name+':other_prefs'] = other_prefs
 
     def handle_search_for_goodreads_books(self, rows, calibre_books):
         for index, row in enumerate(rows):
-            debug_print("handle_search_for_goodreads_books")
             calibre_book = calibre_books[index]
             title = calibre_book['calibre_title']
             author = calibre_book['calibre_author']
@@ -1855,6 +1906,7 @@ class DoShelfSyncTableWidget(QTableWidget):
         self.create_context_menu()
         self.itemSelectionChanged.connect(self.item_selection_changed)
         self.doubleClicked.connect(self.search_for_calibre_books_click)
+        self.format = get_date_format()
 
     def create_context_menu(self):
         self.setContextMenuPolicy(Qt.ActionsContextMenu)
@@ -1885,8 +1937,6 @@ class DoShelfSyncTableWidget(QTableWidget):
         self.setHorizontalHeaderLabels(header_labels)
         self.verticalHeader().setDefaultSectionSize(24)
 
-        # We need to re-sort the supplied data using the status attribute in the dictionary
-        #self.goodreads_books = sorted(goodreads_books, key=lambda k: '%d%s' % (k['status'], k['goodreads_id']))
         self.goodreads_books = goodreads_books
         for row, book in enumerate(self.goodreads_books):
             self.populate_table_row(row, book, book_index=row)
@@ -1895,11 +1945,15 @@ class DoShelfSyncTableWidget(QTableWidget):
         self.setItemDelegateForColumn(4, delegate)
         self.setItemDelegateForColumn(11, delegate)
 
+        delegate = DateDelegate(self)
+        self.setItemDelegateForColumn(5, delegate)
+        self.setItemDelegateForColumn(12, delegate)
+        
         self.resizeColumnsToContents()
         self.setRangeColumnWidth(1, 120, 200) # GR Title
         self.setRangeColumnWidth(2, 120, 200) # GR Author
         self.setMinimumColumnWidth(3, 90)
-        self.setMinimumColumnWidth(5, 90) # Ensure space for ISBN to be updated
+        self.setMinimumColumnWidth(5, 90) # Ensure space for date read to be updated
         self.setRangeColumnWidth(8, 120, 200) # calibre Title
         self.setRangeColumnWidth(9, 120, 200) # calibre Author
         self.setSortingEnabled(True)
@@ -1930,14 +1984,14 @@ class DoShelfSyncTableWidget(QTableWidget):
         self.setItem(row,  2, ReadOnlyTableWidgetItem(goodreads_book['goodreads_author']))
         self.setItem(row,  3, ReadOnlyTableWidgetItem(goodreads_book['goodreads_series']))
         self.setItem(row,  4, RatingTableWidgetItem(goodreads_book['goodreads_rating'] *2 , is_read_only=True))
-        self.setItem(row,  5, DateTableWidgetItem(goodreads_book['goodreads_read_at'], is_read_only=True))
+        self.setItem(row,  5, DateTableWidgetItem(goodreads_book['goodreads_read_at'], is_read_only=True, fmt=self.format))
         self.setItem(row,  6, ReadOnlyTableWidgetItem(goodreads_book['goodreads_isbn']))
         self.setItem(row,  7, ReadOnlyTableWidgetItem(goodreads_book['goodreads_shelves']))
         self.setItem(row,  8, SortableReadOnlyTableWidgetItem(goodreads_book['calibre_title'], sort_key=goodreads_book['calibre_title_sort']))
         self.setItem(row,  9, SortableReadOnlyTableWidgetItem(goodreads_book['calibre_author'], sort_key=goodreads_book['calibre_author_sort']))
         self.setItem(row, 10, ReadOnlyTableWidgetItem(goodreads_book['calibre_series']))
         self.setItem(row, 11, RatingTableWidgetItem(goodreads_book['calibre_rating'], is_read_only=True))
-        self.setItem(row, 12, DateTableWidgetItem(goodreads_book['calibre_date_read'], is_read_only=True))
+        self.setItem(row, 12, DateTableWidgetItem(goodreads_book['calibre_date_read'], is_read_only=True, fmt=self.format))
         self.setItem(row, 13, ReadOnlyTableWidgetItem(goodreads_book['calibre_isbn']))
         if book_index >= 0:
             self.setItem(row, 14, NumericTableWidgetItem(book_index, is_read_only=True))
@@ -1946,8 +2000,8 @@ class DoShelfSyncTableWidget(QTableWidget):
 
     def find_and_populate_table_row(self, book_index, book_to_update):
         for row in range(self.rowCount()):
-            if book_index == convert_qvariant(self.item(row, 1).data(Qt.UserRole)):
-                self.populate_table_row(row, book_to_update, book_index=convert_qvariant(self.item(row, 1).data(Qt.UserRole)))
+            if book_index == self.item(row, 1).data(Qt.UserRole):
+                self.populate_table_row(row, book_to_update, book_index=self.item(row, 1).data(Qt.UserRole))
                 break
 
     def item_selection_changed(self):
@@ -1955,13 +2009,13 @@ class DoShelfSyncTableWidget(QTableWidget):
         selection_is_not_valid = True
         add_empty_is_valid = True
 
-        if self.currentRow() < 0:
+        if not self.selectionModel().hasSelection():
             selection_has_no_goodreads_id = False
             selection_is_not_valid = False
             add_empty_is_valid = False
         else:
             for row in self.selectionModel().selectedRows():
-                book = self.goodreads_books[convert_qvariant(self.item(row.row(), 1).data(Qt.UserRole))]
+                book = self.goodreads_books[self.item(row.row(), 1).data(Qt.UserRole)]
                 if book['status'] == ActionStatus.WARNING:
                     add_empty_is_valid = False
                 if book['status'] == ActionStatus.VALID:
@@ -1976,16 +2030,16 @@ class DoShelfSyncTableWidget(QTableWidget):
 
     def view_book_on_goodreads_click(self):
         for row in self.selectionModel().selectedRows():
-            book = self.goodreads_books[convert_qvariant(self.item(row.row(), 1).data(Qt.UserRole))]
+            book = self.goodreads_books[self.item(row.row(), 1).data(Qt.UserRole)]
             self.view_book.emit(book['goodreads_id'])
 
     def get_selected_books(self, status=[]):
         rows = []
         books = []
         for row in self.selectionModel().selectedRows():
-            book = self.goodreads_books[convert_qvariant(self.item(row.row(), 1).data(Qt.UserRole))]
+            book = self.goodreads_books[self.item(row.row(), 1).data(Qt.UserRole)]
             if book['status'] in status:
-                rows.append(convert_qvariant(self.item(row.row(), 1).data(Qt.UserRole)))
+                rows.append(self.item(row.row(), 1).data(Qt.UserRole))
                 books.append(book)
         return (rows, books)
 
@@ -2032,16 +2086,23 @@ class DoShelfSyncDialog(SizePersistedDialog):
         self.setWindowTitle(window_text)
         layout = QVBoxLayout(self)
         self.setLayout(layout)
+        self.splitter = QSplitter(self)
+        self.splitter.setOrientation(Qt.Vertical)
+        layout.addWidget(self.splitter)
+        splitter_top = QWidget(self)
+        self.splitter.addWidget(splitter_top)
+        top_layout = QVBoxLayout()
+        splitter_top.setLayout(top_layout)
 
         if len(self.shelf_names) == 1:
             title = _("Sync from '{0}' shelf").format(self.shelf_names[0])
         else:
             title = _("Sync from {0} shelves").format(len(self.shelf_names))
         title_layout = ImageTitleLayout(self, 'images/sync_from_shelf_lg.png', title)
-        layout.addLayout(title_layout)
+        top_layout.addLayout(title_layout)
 
         heading_layout = QHBoxLayout()
-        layout.addLayout(heading_layout)
+        top_layout.addLayout(heading_layout)
         message_text = _('To fix missing links, double click to search for a matching book in calibre.')
         heading_layout.addWidget(QLabel(message_text, self))
         self.error_label = QLabel('', self)
@@ -2053,17 +2114,18 @@ class DoShelfSyncDialog(SizePersistedDialog):
         self.summary_table.search_for_goodreads_books.connect(self.handle_search_calibre_for_goodreads_books)
         self.summary_table.add_empty_books.connect(self.handle_add_empty_books)
         self.summary_table.book_selection_changed.connect(self.handle_book_selection_changed)
-        layout.addWidget(self.summary_table)
-        layout.setStretchFactor(self.summary_table, 10)
+        top_layout.addWidget(self.summary_table)
 
+        splitter_bottom = QWidget(self)
+        self.splitter.addWidget(splitter_bottom)
         actions_layout = QGridLayout()
-        layout.addLayout(actions_layout, 1)
+        splitter_bottom.setLayout(actions_layout)
 
         self.description = QTextEdit(self)
         self.description.setReadOnly(True)
-        self.description.setMaximumHeight(40)
         actions_layout.addWidget(QLabel(_('The following actions will be performed for books that are synced:'), self), 0, 0)
-        actions_layout.addWidget(self.description, 1, 0, 2, 1)
+        actions_layout.addWidget(self.description, 1, 0, 4, 1)
+        actions_layout.setRowStretch(4, 2)
         self._display_sync_actions()
 
         if self.update_rating:
@@ -2087,7 +2149,7 @@ class DoShelfSyncDialog(SizePersistedDialog):
         auto_match_result = gprefs.get(self.unique_pref_name+':auto match', False)
         self.auto_match_checkbox.setChecked(auto_match_result)
         self.auto_match_checkbox.stateChanged.connect(self.auto_match_state_changed)
-
+        
         button_box = QDialogButtonBox()
         self.sync_button = button_box.addButton(_('Sync Now'), QDialogButtonBox.AcceptRole)
         self.sync_button.setDefault(True)
@@ -2238,7 +2300,6 @@ class DoShelfSyncDialog(SizePersistedDialog):
         toggled_ids = []
         for index, row in enumerate(rows):
             goodreads_book = goodreads_books[index]
-#             debug_print("handle_add_empty_books: index=%s, row=%, goodreads_book=%s" % (index, row, goodreads_book))
             if goodreads_book['status'] == ActionStatus.ADD_EMPTY:
                 goodreads_book['calibre_id'] = ''
                 goodreads_book['calibre_isbn'] = ''
@@ -2354,7 +2415,7 @@ class DoShelfSyncDialog(SizePersistedDialog):
         self.summary_table.find_and_populate_table_row(row, goodreads_book)
         # We also need to check whether we now have a duplicate link situation
         # where another Goodreads book is also linked to this Goodreads id.
-#         for other_book in self.goodreads_books:
+        # for other_book in self.goodreads_books:
         for index, other_book in enumerate(self.goodreads_books):
             if other_book['goodreads_id'] == goodreads_book['goodreads_id']:
                 # Don't compare with ourselves

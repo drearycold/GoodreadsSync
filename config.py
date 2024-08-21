@@ -1,32 +1,27 @@
-#!/usr/bin/env python
-# vim:fileencoding=UTF-8:ts=4:sw=4:sta:et:sts=4:ai
-from __future__ import (unicode_literals, division, absolute_import,
-                        print_function)
+from __future__ import unicode_literals, division, absolute_import, print_function
 
 __license__   = 'GPL v3'
-__copyright__ = '2011, Grant Drake <grant.drake@gmail.com>, 2015-2016 additions by David Forrester <davidfor@internode.on.net>'
-__docformat__ = 'restructuredtext en'
+__copyright__ = '2011, Grant Drake'
 
 from collections import OrderedDict
 from functools import partial
 
 # calibre Python 3 compatibility.
-import six
 from six import text_type as unicode
 
+# Maintain backwards compatibility with older versions of Qt and calibre.
 try:
-    from PyQt5 import QtCore
-    from PyQt5 import QtWidgets as QtGui
+    from qt.core import (Qt, QWidget, QVBoxLayout, QLabel, QLineEdit, QGridLayout, QUrl,
+                          QGroupBox, QHBoxLayout, QComboBox, QCheckBox, QFormLayout,
+                          QIcon, QTableWidget, QTableWidgetItem, QPushButton, QInputDialog,
+                          QAbstractItemView, QDialog, QDialogButtonBox, QAction, QToolButton, 
+                          QSpacerItem, QModelIndex)
+except ImportError:
     from PyQt5.Qt import (Qt, QWidget, QVBoxLayout, QLabel, QLineEdit, QGridLayout, QUrl,
                           QGroupBox, QHBoxLayout, QComboBox, QCheckBox, QFormLayout,
                           QIcon, QTableWidget, QTableWidgetItem, QPushButton, QInputDialog,
-                          QAbstractItemView, QDialog, QDialogButtonBox, QAction)
-except ImportError:
-    from PyQt4.Qt import (Qt, QWidget, QVBoxLayout, QLabel, QLineEdit, QGridLayout, QUrl,
-                          QGroupBox, QHBoxLayout, QComboBox, QCheckBox, QFormLayout,
-                          QIcon, QTableWidget, QTableWidgetItem, QPushButton, QInputDialog,
-                          QAbstractItemView, QDialog, QDialogButtonBox, QAction)
-    from PyQt4 import QtGui, QtCore
+                          QAbstractItemView, QDialog, QDialogButtonBox, QAction, QToolButton,
+                          QSpacerItem, QModelIndex)
 
 from calibre import prints
 from calibre.constants import DEBUG
@@ -34,10 +29,23 @@ from calibre.gui2 import error_dialog, question_dialog, info_dialog, open_url
 from calibre.gui2.complete2 import EditWithComplete
 from calibre.utils.config import JSONConfig
 from calibre.utils.icu import sort_key
+from calibre.devices.usbms.driver import debug_print
 
-from calibre_plugins.goodreads_sync.common_utils import (NoWheelComboBox, SizePersistedDialog,
-            ReadOnlyTextIconWidgetItem, get_icon, CheckableTableWidgetItem, ReadOnlyTableWidgetItem,
-            ImageTitleLayout, KeyboardConfigDialog, CustomColumnComboBox)
+from calibre_plugins.goodreads_sync.common_compatibility import qSizePolicy_Expanding, qSizePolicy_Minimum
+from calibre_plugins.goodreads_sync.common_icons import get_icon
+from calibre_plugins.goodreads_sync.common_dialogs import SizePersistedDialog, KeyboardConfigDialog
+from calibre_plugins.goodreads_sync.common_widgets import (NoWheelComboBox, ReadOnlyTextIconWidgetItem,
+                                                    CheckableTableWidgetItem, ReadOnlyTableWidgetItem,
+                                                    ImageTitleLayout, CustomColumnComboBox)
+
+HELP_URL = 'https://github.com/kiwidude68/calibre_plugins/wiki/Goodreads-Sync'
+
+SUPPORTS_CREATE_CUSTOM_COLUMN = False
+try:
+    from calibre.gui2.preferences.create_custom_column import CreateNewCustomColumn
+    SUPPORTS_CREATE_CUSTOM_COLUMN = True
+except ImportError:
+    SUPPORTS_CREATE_CUSTOM_COLUMN = False
 
 try:
     load_translations()
@@ -112,13 +120,63 @@ KEY_USER_SECRET = 'userSecret'
 KEY_SHELVES = 'shelves'
 DEFAULT_USERS_STORE = {}
 
+SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_TAGS               = '#goodreads_tags'
+SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_RATING             = '#goodreads_rating'
+SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_DATE_READ          = '#goodreads_date_read'
+SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_REVIEW_TEXT        = '#goodreads_review'
+SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_READING_PROGRESS   = '#goodreads_reading_progress'
+CUSTOM_COLUMN_DEFAULTS = {
+                SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_TAGS : {
+                    'column_heading': _("Goodreads Tags"),
+                    'datatype' : 'text',
+                    'is_multiple' : True,
+                    'description' : _("Goodreads tags used for mapping to calbre."),
+                    'columns_list' : 'avail_text_columns',
+                    'config_label' : _('Tags column:'),
+                    'config_tool_tip' : _('For use with the "Download tags from shelves" and "Upload tags as shelves" menu items'),
+                    'initial_items': ['tags']
+                },
+                SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_RATING : {
+                    'column_heading': _("Goodreads Rating"),
+                    'datatype' : 'rating',
+                    'description' : _("Rating for the book."),
+                    'columns_list' : 'avail_rating_columns',
+                    'config_label' : _('Rating column:'),
+                    'config_tool_tip' : _('For use with the "Add to shelf" and "Sync from shelf" menu items\nto synchronise with your Goodreads review for a book'),
+                    'initial_items': ['']
+                },
+                SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_DATE_READ : {
+                    'column_heading': _("Date Read"),
+                    'datatype' : 'datetime',
+                    'description' : _("Date when the book was last read."),
+                    'columns_list' : 'avail_date_columns',
+                    'config_label' : _('Date read column:'),
+                    'config_tool_tip' : _('For use with the "Add to shelf" and "Sync from shelf" menu items\nto synchronise with your Goodreads review for a book'),
+                    'initial_items': ['']
+                },
+                SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_REVIEW_TEXT : {
+                    'column_heading': _("Goodreads Review"),
+                    'datatype' : 'comments',
+                    'description' : _("Review of book."),
+                    'columns_list' : 'get_long_text_custom_columns',
+                    'config_label' : _('Review text column:'),
+                    'config_tool_tip' : _('For use with the "Add to shelf" and "Sync from shelf" menu items\nto synchronise with your Goodreads review for a book'),
+                    'initial_items': ['','comments']
+                },
+                SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_READING_PROGRESS : {
+                    'column_heading': _("Goodreads Progress"),
+                    'datatype' : 'int',
+                    'description' : _("Reading progress for the book"),
+                    'columns_list' : 'avail_number_columns',
+                    'config_label' : _('Reading progress column:'),
+                    'config_tool_tip' : _('For use with the "Add to shelf" and "Sync from shelf" menu items\nto synchronise with your Goodreads review for a book'),
+                    'initial_items': ['']
+                },
+            }
+
+
 URL = 'http://www.goodreads.com'
 URL_HTTPS = 'https://www.goodreads.com'
-
-try:
-    _fromUtf8 = QtCore.QString.fromUtf8
-except AttributeError:
-    _fromUtf8 = lambda s: s
 
 # This is where all preferences for this plugin will be stored
 plugin_prefs = JSONConfig('plugins/Goodreads Sync')
@@ -180,6 +238,9 @@ def migrate_config_if_required():
         goodreads_settings[KEY_REVIEW_TEXT_COLUMN] = ''
         plugin_prefs[STORE_PLUGIN] = goodreads_settings
 
+def show_help():
+    open_url(QUrl(HELP_URL))
+   
 
 class UserComboBox(QComboBox):
 
@@ -409,28 +470,19 @@ class MaintainActionsTableWidget(QTableWidget):
         combo = CustomColumnComboBox(self, self.custom_columns, column_key, initial_items=['tags'])
         combo.currentIndexChanged.connect(partial(self.column_type_changed, combo, row))
         self.setCellWidget(row, 1, combo)
-        print("populate_table_row - column_key=", column_key)
-        try:
-            print("populate_table_row - column=", self.custom_columns[column_key])
-        except:
-            pass
         if self.is_bool_custom_column(column_key):
             self.setCellWidget(row, 2, BoolColumnComboBox(self, sync_action['value']))
         elif self.is_datetime_custom_column(column_key):
             self.setCellWidget(row, 2, DateTimeColumnComboBox(self, sync_action['value'], is_add_values=self.is_shelf_add_actions))
         elif self.is_enumeration_custom_column(column_key):
-            print("populate_table_row - enumeration")
             values = self.custom_columns[column_key]['display']['enum_values']
             self.setCellWidget(row, 2, EnumColumnComboBox(self, sync_action['value'], values))
         elif column_key == 'tags':
-            print("populate_table_row - tag")
             self.setCellWidget(row, 2, self.create_tags_edit(sync_action['value'], self.all_tags))
         elif self.custom_columns[column_key]['is_multiple'] is not None:
-            print("populate_table_row - tag-like column")
             values = self.get_taglike_column_values(column_key)
             self.setCellWidget(row, 2, self.create_tags_edit(sync_action['value'], values))
         else:
-            print("populate_table_row - other column")
             self.setItem(row, 2, QTableWidgetItem(sync_action['value']))
 
     def column_type_changed(self, combo, row):
@@ -445,7 +497,6 @@ class MaintainActionsTableWidget(QTableWidget):
         elif column_key == 'tags':
             self.setCellWidget(row, 2, self.create_tags_edit('', self.all_tags))
         elif self.custom_columns[column_key]['is_multiple'] is not None:
-            print("populate_table_row - tag-like column")
             values = self.get_taglike_column_values(column_key)
             self.setCellWidget(row, 2, self.create_tags_edit('', values))
         else:
@@ -483,20 +534,23 @@ class MaintainActionsTableWidget(QTableWidget):
 
     def delete_rows(self):
         self.setFocus()
-        rows = self.selectionModel().selectedRows()
-        if len(rows) == 0:
+        selrows = self.selectionModel().selectedRows()
+        selrows = sorted(selrows, key=lambda x: x.row())
+        if len(selrows) == 0:
             return
-        message = '<p>' + _("Are you sure you want to delete this action?")
-        if len(rows) > 1:
-            message = '<p>' + _("Are you sure you want to delete the selected {0} actions?").format(len(rows))
-        if not question_dialog(self, _('Are you sure?'), message, show_copy_button=False):
+        message = _("Are you sure you want to delete this action?")
+        if len(selrows) > 1:
+            message = _("Are you sure you want to delete the selected {0} actions?").format(len(selrows))
+        if not question_dialog(self, _('Are you sure?'), '<p>' + message, show_copy_button=False):
             return
-        first_sel_row = self.currentRow()
-        for selrow in reversed(rows):
-            self.removeRow(selrow.row())
-        if first_sel_row < self.rowCount():
+        first_sel_row = selrows[0].row()
+        for selrow in reversed(selrows):
+            self.model().removeRow(selrow.row())
+        if first_sel_row < self.model().rowCount(QModelIndex()):
+            self.setCurrentIndex(self.model().index(first_sel_row, 0))
             self.select_and_scroll_to_row(first_sel_row)
-        elif self.rowCount() > 0:
+        elif self.model().rowCount(QModelIndex()) > 0:
+            self.setCurrentIndex(self.model().index(first_sel_row - 1, 0))
             self.select_and_scroll_to_row(first_sel_row - 1)
 
     def select_and_scroll_to_row(self, row):
@@ -574,49 +628,62 @@ class MaintainActionsDialog(SizePersistedDialog):
         table_layout.addWidget(self.sync_actions_table)
 
         # Add a vertical layout containing the the buttons to add/remove actions.
-        button_layout = QtGui.QVBoxLayout()
+        button_layout = QVBoxLayout()
         table_layout.addLayout(button_layout)
 
-        add_button = QtGui.QToolButton(self)
+        add_button = QToolButton(self)
         add_button.setToolTip(_('Add action'))
         add_button.setIcon(QIcon(I('plus.png')))
         add_button.clicked.connect(self.sync_actions_table.add_row)
         button_layout.addWidget(add_button)
 
-        delete_button = QtGui.QToolButton(self)
+        delete_button = QToolButton(self)
         delete_button.setToolTip(_('Delete action'))
         delete_button.setIcon(QIcon(I('minus.png')))
         delete_button.clicked.connect(self.sync_actions_table.delete_rows)
         button_layout.addWidget(delete_button)
-        spacerItem1 = QtGui.QSpacerItem(20, 40, QtGui.QSizePolicy.Minimum, QtGui.QSizePolicy.Expanding)
+        spacerItem1 = QSpacerItem(20, 40, qSizePolicy_Minimum, qSizePolicy_Expanding)
         button_layout.addItem(spacerItem1)
 
+        # Do not allow ticking checkboxes for these items when the 'currently-reading' shelf,
+        # as they should only be applied on the 'read' shelf for reading progress purposes.
+        is_currently_reading_shelf = False
+        for shelf in shelves:
+            if shelf['name'] == 'currently-reading':
+                is_currently_reading_shelf = True
+                
         if is_shelf_add_actions:
             rating_title = _('Upload rating to Goodreads when adding to this shelf')
             date_read_title = _('Upload date read to Goodreads when adding to this shelf')
             review_text_title = _('Upload review text to Goodreads when adding to this shelf')
-            upload_rating_enabled = shelves[0].get(KEY_ADD_RATING, False)
-            upload_date_read_enabled = shelves[0].get(KEY_ADD_DATE_READ, False)
-            upload_review_text_enabled = shelves[0].get(KEY_ADD_REVIEW_TEXT, False)
+            upload_rating_enabled = shelves[0].get(KEY_ADD_RATING, False) and not is_currently_reading_shelf
+            upload_date_read_enabled = shelves[0].get(KEY_ADD_DATE_READ, False) and not is_currently_reading_shelf
+            upload_review_text_enabled = shelves[0].get(KEY_ADD_REVIEW_TEXT, False) and not is_currently_reading_shelf
         else:
             rating_title = _('Sync rating from Goodreads when syncing from this shelf')
             date_read_title = _('Sync date read from Goodreads when syncing from this shelf')
             review_text_title = _('Sync review text from Goodreads when syncing from this shelf')
-            upload_rating_enabled = shelves[0].get(KEY_SYNC_RATING, False)
-            upload_date_read_enabled = shelves[0].get(KEY_SYNC_DATE_READ, False)
-            upload_review_text_enabled = shelves[0].get(KEY_SYNC_REVIEW_TEXT, False)
+            upload_rating_enabled = shelves[0].get(KEY_SYNC_RATING, False) and not is_currently_reading_shelf
+            upload_date_read_enabled = shelves[0].get(KEY_SYNC_DATE_READ, False) and not is_currently_reading_shelf
+            upload_review_text_enabled = shelves[0].get(KEY_SYNC_REVIEW_TEXT, False) and not is_currently_reading_shelf
 
         self.upload_rating = QCheckBox(rating_title)
         layout.addWidget(self.upload_rating)
         self.upload_rating.setChecked(upload_rating_enabled)
+        if (is_currently_reading_shelf):
+            self.upload_rating.setDisabled(True)
 
         self.upload_date_read = QCheckBox(date_read_title)
         layout.addWidget(self.upload_date_read)
         self.upload_date_read.setChecked(upload_date_read_enabled)
+        if (is_currently_reading_shelf):
+            self.upload_date_read.setDisabled(True)
 
         self.upload_review_text = QCheckBox(review_text_title)
         layout.addWidget(self.upload_review_text)
         self.upload_review_text.setChecked(upload_review_text_enabled)
+        if (is_currently_reading_shelf):
+            self.upload_review_text.setDisabled(True)
 
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         button_box.accepted.connect(self.accept)
@@ -667,10 +734,10 @@ class ShelvesTableWidget(QTableWidget):
 
     def create_context_menu(self):
         self.setContextMenuPolicy(Qt.ActionsContextMenu)
-        self.edit_shelf_add_action = QAction(get_icon('images/edit_shelf_add_action.png'), _('Edit shelf add actions...'), self)
+        self.edit_shelf_add_action = QAction(get_icon('images/edit_shelf_add_action.png'), _('Edit shelf add actions')+'...', self)
         self.edit_shelf_add_action.triggered.connect(self.edit_shelf_add_actions)
         self.addAction(self.edit_shelf_add_action)
-        self.edit_sync_action = QAction(get_icon('images/edit_sync_action.png'), _('Edit sync actions...'), self)
+        self.edit_sync_action = QAction(get_icon('images/edit_sync_action.png'), _('Edit sync actions')+'...', self)
         self.edit_sync_action.triggered.connect(self.edit_shelf_sync_actions)
         self.addAction(self.edit_sync_action)
         sep1 = QAction(self)
@@ -826,7 +893,7 @@ class ShelvesTableWidget(QTableWidget):
 class ConfigWidget(QWidget):
 
     def __init__(self, plugin_action, grhttp):
-        QWidget.__init__(self)
+        super(ConfigWidget, self).__init__()
         self.plugin_action = plugin_action
         self.db = plugin_action.gui.library_view.model().db
         self.grhttp = grhttp
@@ -834,6 +901,9 @@ class ConfigWidget(QWidget):
         self.users = plugin_prefs[STORE_USERS]
         self.user_name = None
         other_options = plugin_prefs[STORE_PLUGIN]
+        self.must_restart = False
+        self._get_create_new_custom_column_instance = None
+        self.supports_create_custom_column = SUPPORTS_CREATE_CUSTOM_COLUMN
 
         layout = QVBoxLayout(self)
         self.setLayout(layout)
@@ -846,12 +916,12 @@ class ConfigWidget(QWidget):
         self._user_combo.currentIndexChanged.connect(self.user_combo_index_changed)
         self._user_combo.setMinimumSize(150, 20)
         user_layout.addWidget(self._user_combo)
-        self._add_user_button = QtGui.QToolButton(self)
+        self._add_user_button = QToolButton(self)
         self._add_user_button.setToolTip(_('Add user profile'))
         self._add_user_button.setIcon(QIcon(I('plus.png')))
         self._add_user_button.clicked.connect(self.add_user_profile)
         user_layout.addWidget(self._add_user_button)
-        self._delete_user_button = QtGui.QToolButton(self)
+        self._delete_user_button = QToolButton(self)
         self._delete_user_button.setToolTip(_('Delete user profile'))
         self._delete_user_button.setIcon(QIcon(I('minus.png')))
         self._delete_user_button.clicked.connect(self.delete_user_profile)
@@ -861,12 +931,6 @@ class ConfigWidget(QWidget):
         self._auth_button.clicked.connect(self.authorize_plugin)
         user_layout.addWidget(self._auth_button)
         user_layout.addStretch()
-        # Add hyperlink to a help file at the right. We will replace the correct name when it is clicked.
-        help_label = QLabel('<a href="http://www.foo.com/">' + _("Help") + '</a>', self)
-        help_label.setTextInteractionFlags(Qt.LinksAccessibleByMouse | Qt.LinksAccessibleByKeyboard)
-        help_label.setAlignment(Qt.AlignRight)
-        help_label.linkActivated.connect(self.help_link_activated)
-        user_layout.addWidget(help_label)
 
         user_group_box = QGroupBox(_('User Shelves:'), self)
         layout.addWidget(user_group_box, 2)
@@ -885,18 +949,18 @@ class ConfigWidget(QWidget):
         self._sync_shelves_button.setIcon(get_icon('images/refresh.png'))
         self._sync_shelves_button.clicked.connect(self.refresh_shelves_list)
         user_buttons_layout.addWidget(self._sync_shelves_button)
-        self._add_shelf_action_button = QPushButton(_('Add Shelf...'), self)
+        self._add_shelf_action_button = QPushButton(_('Add Shelf')+'...', self)
         self._add_shelf_action_button.setToolTip(_('Add a new shelf'))
         self._add_shelf_action_button.setIcon(get_icon('plus.png'))
         self._add_shelf_action_button.clicked.connect(self.add_shelf)
         user_buttons_layout.addWidget(self._add_shelf_action_button)
         user_buttons_layout.addStretch()
-        self._edit_add_to_shelf_action_button = QPushButton(_("Edit 'Shelf Add' Actions..."), self)
+        self._edit_add_to_shelf_action_button = QPushButton(_("Edit 'Shelf Add' Actions")+'...', self)
         self._edit_add_to_shelf_action_button.setToolTip(_("Edit actions to apply when using 'Add to shelf'"))
         self._edit_add_to_shelf_action_button.setIcon(get_icon('images/edit_shelf_add_action.png'))
         self._edit_add_to_shelf_action_button.clicked.connect(self._shelves_table.edit_shelf_add_actions)
         user_buttons_layout.addWidget(self._edit_add_to_shelf_action_button)
-        self._edit_sync_action_button = QPushButton(_("Edit 'Sync' Actions..."), self)
+        self._edit_sync_action_button = QPushButton(_("Edit 'Sync' Actions")+'...', self)
         self._edit_sync_action_button.setToolTip(_("Edit actions to apply when using 'Sync from shelf'"))
         self._edit_sync_action_button.setIcon(get_icon('images/edit_sync_action.png'))
         self._edit_sync_action_button.clicked.connect(self._shelves_table.edit_shelf_sync_actions)
@@ -920,10 +984,10 @@ class ConfigWidget(QWidget):
                                 (1, KEY_DISPLAY_ADD, _("Display the 'Add to shelf' menu option"), ''),
                                 (2, KEY_DISPLAY_REMOVE, _("Display the 'Remove from shelf' menu option"), ''),
                                 (3, KEY_DISPLAY_UPDATE_PROGRESS, _("Display the 'Update reading progress' menu option"), ''),
-                                (4, KEY_PROGRESS_IS_PERCENT, _("Reading progress is percent read"), _("If the reading progress is the percent read, check this. Otherwise, the reading progress the page number.")),
-                                (5, KEY_DISPLAY_SYNC, _("Display the 'Sync from shelf' menu option"), ''),
-                                (6, KEY_AUTHOR_SWAP, _("If adding empty books, store author as LN,FN"), ''),
-                                (7, KEY_DISPLAY_VIEW_SHELF, _("Display the 'View shelf' menu option"), ''),
+                                (4, KEY_DISPLAY_SYNC, _("Display the 'Sync from shelf' menu option"), ''),
+                                (5, KEY_DISPLAY_VIEW_SHELF, _("Display the 'View shelf' menu option"), ''),
+                                (6, KEY_PROGRESS_IS_PERCENT, _("Reading progress is percent read"), _("If the reading progress is the percent read, check this. Otherwise, the reading progress the page number.")),
+                                (7, KEY_AUTHOR_SWAP, _("If adding empty books, store author as LN,FN"), ''),
                                 ]:
             enabled_checkbox = QCheckBox(display, self)
             enabled_checkbox.setChecked(other_options.get(key, True))
@@ -940,62 +1004,57 @@ class ConfigWidget(QWidget):
         columns_group_box_layout.addLayout(columns_group_box_layout2)
         columns_group_box_layout.addStretch()
 
-        tags_column_label = QLabel(_('Tags column:'), self)
-        tags_column_label.setToolTip(_('For use with the "Download tags from shelves" and "Upload tags as shelves" menu items'))
-        tags_custom_columns = self.get_custom_columns(['text'])
-        self._tag_column_combo = CustomColumnComboBox(self, tags_custom_columns,
-                                                      other_options.get(KEY_TAG_MAPPING_COLUMN, 'tags'),
-                                                      initial_items=['tags'])
-        self._tag_column_combo.setMinimumWidth(120)
+        self.sync_custom_columns = {}
+        self.sync_custom_columns[SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_TAGS] = {'current_columns' : self.get_text_custom_columns}
+        self.sync_custom_columns[SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_RATING] = {'current_columns': self.get_rating_custom_columns}
+        self.sync_custom_columns[SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_DATE_READ] = {'current_columns': self.get_date_custom_columns}
+        self.sync_custom_columns[SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_REVIEW_TEXT] = {'current_columns': self.get_long_text_custom_columns}
+        self.sync_custom_columns[SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_READING_PROGRESS] = {'current_columns': self.get_number_custom_columns}
+
+        self._tag_column_combo = self.create_custom_column_controls(columns_group_box_layout2, SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_TAGS)
         self._tag_column_combo.currentIndexChanged[int].connect(self.tag_column_combo_changed)
-        tags_column_label.setBuddy(self._tag_column_combo)
-        columns_group_box_layout2.addRow(tags_column_label, self._tag_column_combo)
+        self._rating_column_combo = self.create_custom_column_controls(columns_group_box_layout2, SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_RATING)
+        self._dateread_column_combo = self.create_custom_column_controls(columns_group_box_layout2, SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_DATE_READ)
+        self._review_text_column_combo = self.create_custom_column_controls(columns_group_box_layout2, SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_REVIEW_TEXT)
+        self._reading_progress_column_combo = self.create_custom_column_controls(columns_group_box_layout2, SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_READING_PROGRESS)
 
-        rating_column_label = QLabel(_('Rating column:'), self)
-        rating_column_label.setToolTip(_('For use with the "Add to shelf" and "Sync from shelf" menu items\nto synchronise with your Goodreads review for a book'))
-        rating_custom_columns = self.get_custom_columns(['rating'])
-        self._rating_column_combo = CustomColumnComboBox(self, rating_custom_columns,
-                                                         other_options.get(KEY_RATING_COLUMN, ''),
-                                                         initial_items=['','rating'])
-        self._rating_column_combo.setMinimumWidth(120)
-        rating_column_label.setBuddy(self._rating_column_combo)
-        columns_group_box_layout2.addRow(rating_column_label, self._rating_column_combo)
-
-        dateread_column_label = QLabel(_('Date read column:'), self)
-        dateread_column_label.setToolTip(_('For use with the "Add to shelf" and "Sync from shelf" menu items\nto synchronise with your Goodreads review for a book'))
-        dateread_custom_columns = self.get_custom_columns(['datetime'])
-        self._dateread_column_combo = CustomColumnComboBox(self, dateread_custom_columns, other_options.get(KEY_DATE_READ_COLUMN, ''))
-        self._dateread_column_combo.setMinimumWidth(120)
-        dateread_column_label.setBuddy(self._dateread_column_combo)
-        columns_group_box_layout2.addRow(dateread_column_label, self._dateread_column_combo)
-
-        review_text_column_label = QLabel(_('Review text column:'), self)
-        review_text_column_label.setToolTip(_('For use with the "Add to shelf" and "Sync from shelf" menu items\nto synchronise with your Goodreads review for a book'))
-        review_text_custom_columns = self.get_custom_columns(['text','comments'])
-        self._review_text_column_combo = CustomColumnComboBox(self, review_text_custom_columns,
-                                                              other_options.get(KEY_REVIEW_TEXT_COLUMN, ''),
-                                                              initial_items=['','comments'])
-        self._review_text_column_combo.setMinimumWidth(120)
-        review_text_column_label.setBuddy(self._review_text_column_combo)
-        columns_group_box_layout2.addRow(review_text_column_label, self._review_text_column_combo)
-
-        reading_progress_column_label = QLabel(_('Reading progress column:'), self)
-        reading_progress_column_label.setToolTip(_('For use with the "Add to shelf" and "Sync from shelf" menu items\nto synchronise with your Goodreads review for a book'))
-        reading_progress_custom_columns = self.get_custom_columns(['float','int'])
-        self._reading_progress_column_combo = CustomColumnComboBox(self, reading_progress_custom_columns,
-                                                         other_options.get(KEY_READING_PROGRESS_COLUMN, ''),
-                                                         initial_items=[''])
-        self._reading_progress_column_combo.setMinimumWidth(120)
-        reading_progress_column_label.setBuddy(self._reading_progress_column_combo)
-        columns_group_box_layout2.addRow(reading_progress_column_label, self._reading_progress_column_combo)
+        self._tag_column_combo.populate_combo(
+                    self.sync_custom_columns[SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_TAGS]['current_columns'](), 
+                    other_options.get(KEY_TAG_MAPPING_COLUMN, 'tags'), 
+                    initial_items=CUSTOM_COLUMN_DEFAULTS[SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_TAGS]['initial_items']
+                    )
+        self._rating_column_combo.populate_combo(
+                    self.sync_custom_columns[SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_RATING]['current_columns'](), 
+                    other_options.get(KEY_RATING_COLUMN, ''),
+                    initial_items=CUSTOM_COLUMN_DEFAULTS[SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_RATING]['initial_items']
+                    )
+        self._dateread_column_combo.populate_combo(
+                    self.sync_custom_columns[SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_DATE_READ]['current_columns'](), 
+                    other_options.get(KEY_DATE_READ_COLUMN, ''),
+                    initial_items=CUSTOM_COLUMN_DEFAULTS[SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_DATE_READ]['initial_items']
+                    )
+        self._review_text_column_combo.populate_combo(
+                    self.sync_custom_columns[SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_REVIEW_TEXT]['current_columns'](), 
+                    other_options.get(KEY_REVIEW_TEXT_COLUMN, ''),
+                    initial_items=CUSTOM_COLUMN_DEFAULTS[SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_REVIEW_TEXT]['initial_items']
+                    )
+        self._reading_progress_column_combo.populate_combo(
+                    self.sync_custom_columns[SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_READING_PROGRESS]['current_columns'](), 
+                    other_options.get(KEY_READING_PROGRESS_COLUMN, ''),
+                    initial_items=CUSTOM_COLUMN_DEFAULTS[SYNC_CUSTOM_COLUMN_DEFAULT_LOOKUP_READING_PROGRESS]['initial_items']
+                    )
 
         keyboard_layout = QHBoxLayout()
         layout.addLayout(keyboard_layout)
-        keyboard_shortcuts_button = QPushButton(_('Keyboard shortcuts...'), self)
-        keyboard_shortcuts_button.setToolTip(_(
-                    _('Edit the keyboard shortcuts associated with this plugin')))
+        keyboard_shortcuts_button = QPushButton(' '+_('Keyboard shortcuts')+'... ', self)
+        keyboard_shortcuts_button.setToolTip(_('Edit the keyboard shortcuts associated with this plugin'))
         keyboard_shortcuts_button.clicked.connect(self.edit_shortcuts)
         keyboard_layout.addWidget(keyboard_shortcuts_button)
+
+        help_button = QPushButton(' '+_('Help'), self)
+        help_button.setIcon(get_icon('help.png'))
+        help_button.clicked.connect(show_help)
+        keyboard_layout.addWidget(help_button)
         keyboard_layout.addStretch()
 
         # Force the possible tags values to be set based on the initial tag column setting
@@ -1028,17 +1087,40 @@ class ConfigWidget(QWidget):
 
         plugin_prefs[STORE_PLUGIN] = other_options
 
+    def get_number_custom_columns(self):
+        column_types = ['float','int']
+        return self.get_custom_columns(column_types)
+
+    def get_rating_custom_columns(self):
+        column_types = ['rating','int']
+        custom_columns = self.get_custom_columns(column_types)
+        ratings_column_name = self.plugin_action.gui.library_view.model().orig_headers['rating']
+        custom_columns['rating'] = {'name': ratings_column_name}
+        return custom_columns
+
+    def get_text_custom_columns(self):
+        column_types = ['text']
+        return self.get_custom_columns(column_types)
+
+    def get_long_text_custom_columns(self):
+        column_types = ['text', 'comments']
+        return self.get_custom_columns(column_types)
+
+    def get_date_custom_columns(self):
+        column_types = ['datetime']
+        return self.get_custom_columns(column_types)
+
     def get_custom_columns(self, column_types):
-        custom_columns = self.plugin_action.gui.library_view.model().custom_columns
+        if self.supports_create_custom_column:
+            custom_columns = self.get_create_new_custom_column_instance.current_columns()
+        else:
+            custom_columns = self.plugin_action.gui.library_view.model().custom_columns
         available_columns = {}
         for key, column in custom_columns.items():
             typ = column['datatype']
             if typ in column_types:
                 available_columns[key] = column
         return available_columns
-
-    def help_link_activated(self, url):
-        self.plugin_action.show_help()
 
     def persist_user_config(self):
         if not self.user_name:
@@ -1070,13 +1152,17 @@ class ConfigWidget(QWidget):
 
     def tag_column_combo_changed(self):
         selected_column = self._tag_column_combo.get_selected_column()
+        values = []
         if selected_column == 'tags':
             values = self.all_tags
-        else:
+        elif selected_column is not None:
             # Need to get all the possible values for this custom column
-            label = self.db.field_metadata.key_to_label(selected_column)
-            values = list(self.db.all_custom(label=label))
-            values.sort(key=sort_key)
+            try: # Catch an error when new columns are being added.
+                label = self.db.field_metadata.key_to_label(selected_column)
+                values = list(self.db.all_custom(label=label))
+                values.sort(key=sort_key)
+            except:
+                pass 
         self._shelves_table.set_tags_values(values)
 
     def add_user_profile(self):
@@ -1104,7 +1190,7 @@ class ConfigWidget(QWidget):
         self.user_combo_index_changed()
 
     def delete_user_profile(self):
-        if not question_dialog(self, _(_('Are you sure?')), '<p>'+
+        if not question_dialog(self, _('Are you sure?'), '<p>'+
                 _("Do you want to delete the user profile for '{0}'").format(self.user_name),
                 show_copy_button=False):
             return
@@ -1185,7 +1271,7 @@ class ConfigWidget(QWidget):
         shelves = user_info[KEY_SHELVES]
         if new_shelf_name in shelves:
             return error_dialog(self, _('Duplicate shelf name'),
-                _('There is already a shelf named: ') + new_shelf_name, show=True)
+                _('There is already a shelf named:') +' '+ new_shelf_name, show=True)
         # Perform the update with Goodreads
         if self.grhttp.create_shelf(self.user_name, new_shelf_name, d.is_featured,
                                     d.is_exclusive, d.is_sortable):
@@ -1199,6 +1285,52 @@ class ConfigWidget(QWidget):
         d = KeyboardConfigDialog(self.plugin_action.gui, self.plugin_action.action_spec[0])
         if d.exec_() == d.Accepted:
             self.plugin_action.gui.keyboard.finalize()
+
+    def create_custom_column_controls(self, columns_group_box_layout, custom_col_name, min_width=120):
+        current_Location_label = QLabel(CUSTOM_COLUMN_DEFAULTS[custom_col_name]['config_label'], self)
+        current_Location_label.setToolTip(CUSTOM_COLUMN_DEFAULTS[custom_col_name]['config_tool_tip'])
+        initial_items = CUSTOM_COLUMN_DEFAULTS[custom_col_name].get('initial_items', [])
+        create_column_callback=partial(self.create_custom_column, custom_col_name) if self.supports_create_custom_column else None
+        avail_columns = self.sync_custom_columns[custom_col_name]['current_columns']()
+        custom_column_combo = CustomColumnComboBox(self, avail_columns, initial_items=initial_items, create_column_callback=create_column_callback)
+        custom_column_combo.setMinimumWidth(min_width)
+        current_Location_label.setBuddy(custom_column_combo)
+        columns_group_box_layout.addRow(current_Location_label, custom_column_combo)
+        self.sync_custom_columns[custom_col_name]['combo_box'] = custom_column_combo
+
+        return custom_column_combo
+
+    def create_custom_column(self, lookup_name=None):
+        display_params = {
+            'description': CUSTOM_COLUMN_DEFAULTS[lookup_name]['description']
+        }
+        datatype = CUSTOM_COLUMN_DEFAULTS[lookup_name]['datatype']
+        column_heading  = CUSTOM_COLUMN_DEFAULTS[lookup_name]['column_heading']
+        is_multiple = CUSTOM_COLUMN_DEFAULTS[lookup_name].get('is_multiple', False)
+
+        new_lookup_name = lookup_name
+
+        create_new_custom_column_instance = self.get_create_new_custom_column_instance
+        result = create_new_custom_column_instance.create_column(new_lookup_name, column_heading, datatype, is_multiple, display=display_params, generate_unused_lookup_name=True, freeze_lookup_name=False)
+        if result[0] == CreateNewCustomColumn.Result.COLUMN_ADDED:
+            # print(self.get_text_custom_columns())
+            # print(self.plugin_action.gui.current_db.field_metadata.custom_field_metadata())
+            self.sync_custom_columns[lookup_name]['combo_box'].populate_combo(
+                                self.sync_custom_columns[lookup_name]['current_columns'](), 
+                                result[1],
+                                initial_items=CUSTOM_COLUMN_DEFAULTS[lookup_name]['initial_items']
+                                )
+            self.must_restart = True
+            return True
+        
+        return False
+
+    @property
+    def get_create_new_custom_column_instance(self):
+        if self._get_create_new_custom_column_instance is None and self.supports_create_custom_column:
+            self._get_create_new_custom_column_instance = CreateNewCustomColumn(self.plugin_action.gui)
+        return self._get_create_new_custom_column_instance
+
 
 # Ensure our config gets migrated
 migrate_config_if_required()
